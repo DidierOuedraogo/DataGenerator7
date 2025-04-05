@@ -4,24 +4,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
-import plotly.graph_objects as go
-from io import BytesIO, StringIO
+from io import BytesIO
 import base64
 from datetime import datetime
 import re
-import uuid
 import json
-import tempfile
-import os
-import time
-import atexit
-
-# Pour les rapports PDF avec FPDF2
-from fpdf import FPDF
 
 # Configuration de la page
 st.set_page_config(
-    page_title="Générateur de Données Minières Avancé",
+    page_title="Générateur de Données Minières",
     page_icon="⛏️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -49,17 +40,12 @@ if 'user_preferences' not in st.session_state:
         'default_distribution': "Log-normale",
         'color_theme': "viridis",
         'include_qaqc': True,
-        'include_anomalies': False,
-        'dark_mode': False
+        'include_anomalies': False
     }
 if 'uploaded_data' not in st.session_state:
     st.session_state.uploaded_data = None
 if 'comparison_mode' not in st.session_state:
     st.session_state.comparison_mode = False
-if 'unique_id' not in st.session_state:
-    st.session_state.unique_id = str(uuid.uuid4())[:8]
-if 'temp_files' not in st.session_state:
-    st.session_state.temp_files = []
 
 # Fonction pour déterminer les valeurs par défaut en fonction de l'élément
 def get_default_min(element):
@@ -77,7 +63,6 @@ def get_default_max(element):
     return defaults.get(element, 100.0)
 
 # Fonction pour générer des données d'échantillons
-@st.cache_data(ttl=3600, show_spinner=False)
 def generate_sample_data(sample_count, elements, min_values, max_values, distribution_type, 
                          correlation_matrix=None, anomaly_percent=0, seed=None):
     """
@@ -170,7 +155,6 @@ def generate_sample_data(sample_count, elements, min_values, max_values, distrib
     return data
 
 # Fonction pour générer des données QAQC
-@st.cache_data(ttl=3600, show_spinner=False)
 def generate_qaqc_data(sample_data, elements, crm_count=5, duplicate_count=5, blank_count=5, seed=None):
     """
     Génère des données de contrôle qualité (QAQC) basées sur les échantillons.
@@ -187,7 +171,7 @@ def generate_qaqc_data(sample_data, elements, crm_count=5, duplicate_count=5, bl
     
     # Déterminer les valeurs de référence pour chaque CRM (pour chaque élément)
     crm_values = []
-    std_values = []  # Initialisation de std_values qui manquait dans votre code original
+    std_values = []  # Initialisation de std_values
     
     for element in elements:
         # Valeur moyenne de l'élément comme base
@@ -299,18 +283,11 @@ def analyze_uploaded_data(uploaded_df, elements):
     dist_analysis = {}
     for element in elements:
         if element in uploaded_df.columns:
-            # Test de normalité de Shapiro-Wilk (échantillon de max 5000 points pour performance)
-            from scipy import stats
-            sample = uploaded_df[element].sample(min(5000, len(uploaded_df)))
-            shapiro_test = stats.shapiro(sample)
-            
             # Skewness et Kurtosis
             skewness = uploaded_df[element].skew()
             kurtosis = uploaded_df[element].kurtosis()
             
             dist_analysis[element] = {
-                'shapiro_p_value': shapiro_test.pvalue,
-                'is_normal': shapiro_test.pvalue > 0.05,
                 'skewness': skewness,
                 'kurtosis': kurtosis,
                 'suggested_distribution': 'Log-normale' if skewness > 1.0 else 'Normale'
@@ -331,274 +308,6 @@ def analyze_uploaded_data(uploaded_df, elements):
     
     return analysis
 
-# Fonction pour générer un rapport PDF avec FPDF2
-def generate_pdf_report(data, elements, config, analysis=None, comparison=None):
-    """
-    Génère un rapport PDF détaillé des données générées en utilisant FPDF2.
-    """
-    # Créer un fichier temporaire pour le PDF
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
-    temp_filename = temp_file.name
-    temp_file.close()
-    
-    # Ajouter le fichier à la liste des fichiers temporaires
-    st.session_state.temp_files.append(temp_filename)
-    
-    # Créer un nouveau PDF
-    pdf = FPDF()
-    pdf.add_page()
-    
-    # Définir les styles
-    pdf.set_font("Arial", "B", 16)
-    
-    # Titre et date
-    pdf.cell(0, 10, "Rapport de Données Minières Synthétiques", 0, 1, "C")
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 10, f"Généré le: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 0, 1)
-    pdf.ln(5)
-    
-    # Configuration utilisée
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, "Configuration", 0, 1)
-    pdf.set_font("Arial", "", 10)
-    
-    # Tableau de configuration
-    config_data = [
-        ["Paramètre", "Valeur"],
-        ["Nombre d'échantillons", str(config.get('sample_count', 'N/A'))],
-        ["Éléments", ", ".join(elements)],
-        ["Type de distribution", config.get('distribution_type', 'N/A')],
-        ["Anomalies", f"{config.get('anomaly_percent', 0)}%" if config.get('include_anomalies', False) else "Non"]
-    ]
-    if config.get('include_qaqc', False):
-        config_data.append(["QAQC", "Oui"])
-        config_data.append(["Nombre de CRM", str(config.get('crm_count', 'N/A'))])
-        config_data.append(["Nombre de duplicatas", str(config.get('duplicate_count', 'N/A'))])
-        config_data.append(["Nombre de blancs", str(config.get('blank_count', 'N/A'))])
-    else:
-        config_data.append(["QAQC", "Non"])
-    
-    # Dessiner le tableau de configuration
-    column_width = 90
-    row_height = 8
-    for i, row in enumerate(config_data):
-        for j, cell in enumerate(row):
-            # Fond gris pour l'en-tête
-            if i == 0:
-                pdf.set_fill_color(200, 200, 200)
-            else:
-                pdf.set_fill_color(245, 245, 245)
-            
-            # Dessiner la cellule
-            pdf.cell(column_width, row_height, cell, 1, 0, "L", i == 0 or j == 0)
-        pdf.ln(row_height)
-    
-    pdf.ln(10)
-    
-    # Statistiques descriptives
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, "Statistiques Descriptives", 0, 1)
-    pdf.set_font("Arial", "", 10)
-    
-    # Tableau de statistiques
-    stats_df = data[elements].describe().reset_index()
-    
-    # En-tête du tableau
-    stats_header = ["Statistique"] + elements
-    column_width = 180 / len(stats_header)
-    
-    # Dessiner l'en-tête
-    pdf.set_fill_color(200, 200, 200)
-    for header in stats_header:
-        pdf.cell(column_width, row_height, header, 1, 0, "C", True)
-    pdf.ln(row_height)
-    
-    # Dessiner les lignes de statistiques
-    for _, row in stats_df.iterrows():
-        pdf.cell(column_width, row_height, row['index'], 1, 0, "L", True)
-        
-        for element in elements:
-            value = row[element]
-            # Formater les valeurs numériques
-            if isinstance(value, (int, float)):
-                if value >= 1000 or value <= 0.001:
-                    formatted_value = f"{value:.2e}"
-                else:
-                    formatted_value = f"{value:.4f}"
-            else:
-                formatted_value = str(value)
-            pdf.cell(column_width, row_height, formatted_value, 1, 0, "R")
-        pdf.ln(row_height)
-    
-    pdf.ln(10)
-    
-    # Visualisations - Histogrammes
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, "Distributions des Éléments", 0, 1)
-    
-    for i, element in enumerate(elements):
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, f"Distribution de {element}", 0, 1)
-        
-        # Créer histogramme
-        fig, ax = plt.subplots(figsize=(8, 4))
-        if 'Type' in data.columns:
-            sns.histplot(data[data['Type'] == 'Regular'][element], kde=True, ax=ax)
-        else:
-            sns.histplot(data[element], kde=True, ax=ax)
-        ax.set_title(f"Distribution de {element}")
-        
-        # Sauvegarder en fichier temporaire
-        temp_img = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-        temp_img_name = temp_img.name
-        temp_img.close()
-        st.session_state.temp_files.append(temp_img_name)
-        
-        plt.savefig(temp_img_name, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        
-        # Ajouter au PDF
-        pdf.image(temp_img_name, x=10, w=180)
-        pdf.ln(5)
-    
-    # Matrice de corrélation
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, "Matrice de Corrélation", 0, 1)
-    
-    # Calculer la matrice de corrélation
-    if 'Type' in data.columns:
-        corr_matrix = data[data['Type'] == 'Regular'][elements].corr()
-    else:
-        corr_matrix = data[elements].corr()
-    
-    # Créer visualisation de la matrice
-    fig, ax = plt.subplots(figsize=(8, 6))
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', ax=ax, fmt=".2f")
-    
-    # Sauvegarder en fichier temporaire
-    temp_corr = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-    temp_corr_name = temp_corr.name
-    temp_corr.close()
-    st.session_state.temp_files.append(temp_corr_name)
-    
-    plt.savefig(temp_corr_name, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    
-    # Ajouter au PDF
-    pdf.image(temp_corr_name, x=20, w=160)
-    pdf.ln(5)
-    
-    # Ajouter section QAQC si incluse
-    if config.get('include_qaqc', False) and 'Type' in data.columns:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Analyse QAQC", 0, 1)
-        
-        # Résumé QAQC
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, "Résumé des échantillons QAQC", 0, 1)
-        
-        qaqc_summary = data['Type'].value_counts().reset_index()
-        qaqc_summary.columns = ['Type', 'Count']
-        
-        # Dessiner un tableau pour le résumé QAQC
-        pdf.set_font("Arial", "", 10)
-        headers = ["Type d'échantillon", "Nombre"]
-        col_width = 90
-        
-        # En-tête
-        pdf.set_fill_color(200, 200, 200)
-        for header in headers:
-            pdf.cell(col_width, row_height, header, 1, 0, "C", True)
-        pdf.ln(row_height)
-        
-        # Données
-        for _, row in qaqc_summary.iterrows():
-            pdf.cell(col_width, row_height, row['Type'], 1, 0, "L")
-            pdf.cell(col_width, row_height, str(row['Count']), 1, 0, "R")
-            pdf.ln(row_height)
-        
-        pdf.ln(10)
-    
-    # Si des données de comparaison sont fournies
-    if comparison and isinstance(comparison, dict) and 'basic_stats' in comparison:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Comparaison avec Données Réelles", 0, 1)
-        
-        # Tableau de comparaison des statistiques
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, "Comparaison des Statistiques", 0, 1)
-        pdf.set_font("Arial", "", 10)
-        
-        # Statistiques générées et réelles
-        stats_generated = data[elements].describe().reset_index()
-        stats_real = comparison['basic_stats'].reset_index()
-        
-        for stat in stats_generated['index'].unique():
-            # Titre de la statistique
-            pdf.set_fill_color(220, 220, 220)
-            pdf.cell(0, row_height, stat, 1, 1, "C", True)
-            
-            # En-tête des colonnes
-            pdf.set_fill_color(200, 200, 200)
-            pdf.cell(40, row_height, "Type de données", 1, 0, "L", True)
-            
-            col_width = (180 - 40) / len(elements)
-            for element in elements:
-                pdf.cell(col_width, row_height, element, 1, 0, "C", True)
-            pdf.ln(row_height)
-            
-            # Données générées
-            gen_row = stats_generated[stats_generated['index'] == stat].iloc[0]
-            pdf.cell(40, row_height, "Générées", 1, 0, "L")
-            
-            for element in elements:
-                value = gen_row[element]
-                if isinstance(value, (int, float)):
-                    if value >= 1000 or value <= 0.001:
-                        formatted_value = f"{value:.2e}"
-                    else:
-                        formatted_value = f"{value:.4f}"
-                else:
-                    formatted_value = str(value)
-                pdf.cell(col_width, row_height, formatted_value, 1, 0, "R")
-            pdf.ln(row_height)
-            
-            # Données réelles
-            real_row = stats_real[stats_real['index'] == stat].iloc[0]
-            pdf.cell(40, row_height, "Réelles", 1, 0, "L")
-            
-            for element in elements:
-                value = real_row[element]
-                if isinstance(value, (int, float)):
-                    if value >= 1000 or value <= 0.001:
-                        formatted_value = f"{value:.2e}"
-                    else:
-                        formatted_value = f"{value:.4f}"
-                else:
-                    formatted_value = str(value)
-                pdf.cell(col_width, row_height, formatted_value, 1, 0, "R")
-            pdf.ln(row_height)
-            
-            pdf.ln(5)
-    
-    # Sauvegarder le PDF
-    pdf.output(temp_filename)
-    
-    return temp_filename
-
-# Fonction pour nettoyer les fichiers temporaires
-def cleanup_temp_files():
-    for file in st.session_state.temp_files:
-        try:
-            if os.path.exists(file):
-                os.unlink(file)
-        except Exception as e:
-            st.error(f"Erreur lors du nettoyage des fichiers temporaires: {e}")
-    st.session_state.temp_files = []
-
 # Fonction pour sauvegarder les préférences utilisateur
 def save_preferences():
     prefs = st.session_state.user_preferences
@@ -617,9 +326,87 @@ def load_preferences(uploaded_file):
         st.error(f"Erreur lors du chargement des préférences: {e}")
         return False
 
-# Partie principale de l'interface
-st.title("⛏️ Générateur de Données Minières Avancé")
-st.markdown("Cet outil génère des données synthétiques pour l'industrie minière avec fonctionnalités avancées pour l'analyse, la comparaison et le reporting.")
+# Fonction pour créer un rapport HTML 
+def generate_html_report(data, elements, config, analysis=None):
+    """
+    Génère un rapport HTML au lieu de PDF
+    """
+    html = f"""
+    <html>
+    <head>
+        <title>Rapport de Données Minières</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1 {{ color: #2c3e50; }}
+            h2 {{ color: #3498db; }}
+            table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            .stats {{ margin-bottom: 30px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Rapport de Données Minières Synthétiques</h1>
+        <p>Généré le: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        
+        <h2>Configuration</h2>
+        <table>
+            <tr><th>Paramètre</th><th>Valeur</th></tr>
+            <tr><td>Nombre d'échantillons</td><td>{config.get('sample_count', 'N/A')}</td></tr>
+            <tr><td>Éléments</td><td>{', '.join(elements)}</td></tr>
+            <tr><td>Type de distribution</td><td>{config.get('distribution_type', 'N/A')}</td></tr>
+            <tr><td>Anomalies</td><td>{"Oui (" + str(config.get('anomaly_percent', 0)) + "%)" if config.get('include_anomalies', False) else "Non"}</td></tr>
+            <tr><td>QAQC</td><td>{"Oui" if config.get('include_qaqc', False) else "Non"}</td></tr>
+        </table>
+        
+        <h2>Statistiques Descriptives</h2>
+        <div class="stats">
+            <table>
+                <tr><th>Statistique</th>{"".join([f"<th>{elem}</th>" for elem in elements])}</tr>
+    """
+    
+    # Ajouter les statistiques
+    stats = data[elements].describe().reset_index()
+    for _, row in stats.iterrows():
+        html += f"<tr><td>{row['index']}</td>"
+        for element in elements:
+            value = row[element]
+            # Formater les valeurs numériques
+            if isinstance(value, (int, float)):
+                if value >= 1000 or value <= 0.001:
+                    formatted_value = f"{value:.2e}"
+                else:
+                    formatted_value = f"{value:.4f}"
+            else:
+                formatted_value = str(value)
+            html += f"<td>{formatted_value}</td>"
+        html += "</tr>"
+    
+    html += """
+            </table>
+        </div>
+        
+        <h2>Résumé de la distribution</h2>
+        <p>Les visualisations détaillées sont disponibles dans l'application.</p>
+        
+        <h2>Corrélation entre éléments</h2>
+        <p>Une matrice de corrélation complète est disponible dans l'application.</p>
+    """
+    
+    # Ajouter une conclusion
+    html += """
+        <h2>Conclusion</h2>
+        <p>Ce rapport résume les statistiques principales des données minières générées. 
+           Pour une analyse plus approfondie, utilisez les outils interactifs disponibles dans l'application.</p>
+    </body>
+    </html>
+    """
+    
+    return html
+
+# Titre principal
+st.title("⛏️ Générateur de Données Minières")
+st.markdown("Cet outil génère des données synthétiques pour l'industrie minière afin de tester des logiciels ou former des modèles ML.")
 
 # Onglets pour la navigation principale
 tab_generate, tab_analyze, tab_compare, tab_settings = st.tabs(["Générer", "Analyser", "Comparer", "Paramètres"])
@@ -754,7 +541,7 @@ with tab_generate:
     color_theme = st.sidebar.selectbox(
         "Thème de couleur",
         ["viridis", "plasma", "inferno", "magma", "cividis", "mako", "rocket", "turbo"],
-        index=["viridis", "plasma", "inferno", "magma", "cividis", "mako", "rocket", "turbo"].index(st.session_state.user_preferences['color_theme'])
+        index=["viridis", "plasma", "inferno", "magma", "cividis", "mako", "rocket", "turbo"].index(st.session_state.user_preferences.get('color_theme', 'viridis'))
     )
     
     # Bouton pour mettre à jour les préférences
@@ -966,1401 +753,149 @@ with tab_generate:
         st.markdown(get_download_link(all_data, "mining_data.csv", "CSV"), unsafe_allow_html=True)
         
         # Excel
-        excel_file = BytesIO()
-        with pd.ExcelWriter(excel_file, engine='xlsxwriter') as writer:
-            all_data.to_excel(writer, sheet_name='All Data', index=False)
-            
-            if include_qaqc:
-                sample_data.to_excel(writer, sheet_name='Regular Samples', index=False)
-                crm_df.to_excel(writer, sheet_name='CRM', index=False)
-                duplicates_df.to_excel(writer, sheet_name='Duplicates', index=False)
-                blanks_df.to_excel(writer, sheet_name='Blanks', index=False)
-        
-        excel_file.seek(0)
-        b64 = base64.b64encode(excel_file.read()).decode()
-        href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="mining_data.xlsx">Télécharger XLSX</a>'
-        st.markdown(href, unsafe_allow_html=True)
-        
-        # Générer PDF
-        st.subheader("Rapport PDF")
-        if st.button("Générer un rapport PDF"):
-            with st.spinner("Génération du rapport en cours..."):
-                pdf_file = generate_pdf_report(all_data, elements, config)
+        try:
+            excel_file = BytesIO()
+            with pd.ExcelWriter(excel_file, engine='xlsxwriter') as writer:
+                all_data.to_excel(writer, sheet_name='All Data', index=False)
                 
-                # Lire le fichier PDF généré
-                with open(pdf_file, "rb") as f:
-                    pdf_bytes = f.read()
+                if include_qaqc:
+                    sample_data.to_excel(writer, sheet_name='Regular Samples', index=False)
+                    crm_df.to_excel(writer, sheet_name='CRM', index=False)
+                    duplicates_df.to_excel(writer, sheet_name='Duplicates', index=False)
+                    blanks_df.to_excel(writer, sheet_name='Blanks', index=False)
+            
+            excel_file.seek(0)
+            b64 = base64.b64encode(excel_file.read()).decode()
+            href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="mining_data.xlsx">Télécharger XLSX</a>'
+            st.markdown(href, unsafe_allow_html=True)
+        except Exception as e:
+            st.warning(f"Impossible de générer le fichier Excel: {str(e)}. Utilisez le format CSV à la place.")
+        
+        # Générer HTML au lieu de PDF
+        st.subheader("Rapport HTML")
+        if st.button("Générer un rapport HTML"):
+            with st.spinner("Génération du rapport en cours..."):
+                html_report = generate_html_report(all_data, elements, config)
                 
                 # Créer un lien de téléchargement
-                b64_pdf = base64.b64encode(pdf_bytes).decode()
-                href_pdf = f'<a href="data:application/pdf;base64,{b64_pdf}" download="mining_data_report.pdf">Télécharger le rapport PDF</a>'
-                st.markdown(href_pdf, unsafe_allow_html=True)
+                b64_html = base64.b64encode(html_report.encode()).decode()
+                href_html = f'<a href="data:text/html;base64,{b64_html}" download="mining_data_report.html">Télécharger le rapport HTML</a>'
+                st.markdown(href_html, unsafe_allow_html=True)
 
 with tab_analyze:
-    st.header("Analyse Avancée des Données")
+    st.header("Analyse des Données")
     
     # Vérifier si des données sont disponibles
     if not st.session_state.data_generated:
         st.info("Veuillez d'abord générer des données dans l'onglet 'Générer'.")
     else:
-        all_data = st.session_state.all_data
-        elements = st.session_state.elements
-        
-        # Filtres et sélection
-        st.subheader("Filtrer les données")
-        
-        # Sélection du type d'échantillons à analyser
-        if 'Type' in all_data.columns:
-            types = all_data['Type'].unique()
-            selected_types = st.multiselect("Types d'échantillons", types, default=list(types))
-            filtered_data = all_data[all_data['Type'].isin(selected_types)]
-        else:
-            filtered_data = all_data
-        
-        # Filtres sur les coordonnées
-        st.markdown("**Filtres spatiaux**")
-        filter_col1, filter_col2, filter_col3 = st.columns(3)
-        
-        with filter_col1:
-            x_min, x_max = st.slider("Intervalle X", 
-                                    float(all_data['X'].min()), 
-                                    float(all_data['X'].max()), 
-                                    (float(all_data['X'].min()), float(all_data['X'].max())))
-        
-        with filter_col2:
-            y_min, y_max = st.slider("Intervalle Y", 
-                                    float(all_data['Y'].min()), 
-                                    float(all_data['Y'].max()), 
-                                    (float(all_data['Y'].min()), float(all_data['Y'].max())))
-        
-        with filter_col3:
-            z_min, z_max = st.slider("Intervalle Z", 
-                                    float(all_data['Z'].min()), 
-                                    float(all_data['Z'].max()), 
-                                    (float(all_data['Z'].min()), float(all_data['Z'].max())))
-        
-        # Appliquer les filtres spatiaux
-        filtered_data = filtered_data[
-            (filtered_data['X'] >= x_min) & (filtered_data['X'] <= x_max) &
-            (filtered_data['Y'] >= y_min) & (filtered_data['Y'] <= y_max) &
-            (filtered_data['Z'] >= z_min) & (filtered_data['Z'] <= z_max)
-        ]
-        
-        # Filtres sur les teneurs
-        st.markdown("**Filtres sur les teneurs**")
-        
-        element_filters = st.multiselect("Filtrer par élément", elements)
-        
-        for element in element_filters:
-            elem_min, elem_max = st.slider(f"Intervalle {element}", 
-                                        float(all_data[element].min()), 
-                                        float(all_data[element].max()), 
-                                        (float(all_data[element].min()), float(all_data[element].max())))
-            
-            filtered_data = filtered_data[
-                (filtered_data[element] >= elem_min) & (filtered_data[element] <= elem_max)
-            ]
-        
-        # Afficher les résultats filtrés
-        st.markdown(f"**{len(filtered_data)} échantillons** correspondent aux critères de filtrage")
-        st.dataframe(filtered_data.head(10))
-        
-        # Analyses avancées
-        st.subheader("Analyses statistiques avancées")
-        
-        analysis_type = st.selectbox(
-            "Type d'analyse",
-            ["Distribution univariée", "Analyse bivariée", "Analyse spatiale", "Détection d'anomalies"]
-        )
-        
-        if analysis_type == "Distribution univariée":
-            # Sélection de l'élément
-            element = st.selectbox("Élément à analyser", elements)
-            
-            # Sélection du type d'échantillons pour les échantillons normaux
-            if 'Type' in filtered_data.columns:
-                data_for_analysis = filtered_data[filtered_data['Type'] == 'Regular']
-            else:
-                data_for_analysis = filtered_data
-            
-            # Statistiques détaillées
-            st.markdown("**Statistiques détaillées**")
-            
-            from scipy import stats
-            
-            # Calculer les statistiques
-            element_data = data_for_analysis[element].dropna()
-            
-            mean_val = element_data.mean()
-            median_val = element_data.median()
-            std_val = element_data.std()
-            min_val = element_data.min()
-            max_val = element_data.max()
-            q1 = element_data.quantile(0.25)
-            q3 = element_data.quantile(0.75)
-            iqr = q3 - q1
-            skewness = element_data.skew()
-            kurtosis = element_data.kurtosis()
-            
-            # Test de normalité
-            shapiro_test = stats.shapiro(element_data.sample(min(5000, len(element_data))))
-            
-            # Afficher les statistiques dans un format lisible
-            stats_col1, stats_col2, stats_col3 = st.columns(3)
-            
-            with stats_col1:
-                st.metric("Moyenne", f"{mean_val:.4f}")
-                st.metric("Écart-type", f"{std_val:.4f}")
-                st.metric("CV (%)", f"{(std_val/mean_val*100):.2f}%")
-            
-            with stats_col2:
-                st.metric("Médiane", f"{median_val:.4f}")
-                st.metric("Q1 (25%)", f"{q1:.4f}")
-                st.metric("Q3 (75%)", f"{q3:.4f}")
-            
-            with stats_col3:
-                st.metric("Min", f"{min_val:.4f}")
-                st.metric("Max", f"{max_val:.4f}")
-                st.metric("Étendue", f"{max_val-min_val:.4f}")
-            
-            # Distribution et test de normalité
-            dist_col1, dist_col2 = st.columns(2)
-            
-            with dist_col1:
-                st.metric("Skewness", f"{skewness:.4f}")
-                st.metric("Kurtosis", f"{kurtosis:.4f}")
-                
-                # Interprétation de la distribution
-                if abs(skewness) < 0.5:
-                    st.success("Distribution approximativement symétrique")
-                elif abs(skewness) < 1.0:
-                    st.info("Distribution modérément asymétrique")
-                else:
-                    st.warning("Distribution fortement asymétrique")
-            
-            with dist_col2:
-                st.metric("Shapiro p-value", f"{shapiro_test.pvalue:.6f}")
-                
-                # Interprétation du test de normalité
-                if shapiro_test.pvalue > 0.05:
-                    st.success("Distribution probablement normale (p > 0.05)")
-                else:
-                    suggestion = "log-normale" if skewness > 1.0 else "non-normale"
-                    st.warning(f"Distribution non normale (p < 0.05), possiblement {suggestion}")
-            
-            # Visualisations de la distribution
-            st.markdown("**Visualisations de la distribution**")
-            
-            viz_col1, viz_col2 = st.columns(2)
-            
-            with viz_col1:
-                # Histogramme avec courbe KDE
-                fig, ax = plt.subplots(figsize=(10, 6))
-                sns.histplot(element_data, kde=True, ax=ax)
-                ax.set_title(f"Distribution de {element}")
-                ax.set_xlabel(element)
-                ax.set_ylabel("Fréquence")
-                st.pyplot(fig)
-                
-                # Box plot
-                fig, ax = plt.subplots(figsize=(10, 4))
-                sns.boxplot(x=element_data, ax=ax)
-                ax.set_title(f"Box plot de {element}")
-                ax.set_xlabel(element)
-                st.pyplot(fig)
-            
-            with viz_col2:
-                # QQ plot pour tester la normalité
-                fig, ax = plt.subplots(figsize=(10, 6))
-                stats.probplot(element_data, dist="norm", plot=ax)
-                ax.set_title(f"Q-Q Plot de {element} (test de normalité)")
-                st.pyplot(fig)
-                
-                # Histogramme log si skewness élevé
-                if skewness > 1.0:
-                    # Éviter log(0) en ajoutant une petite valeur si nécessaire
-                    log_data = np.log(element_data + (0.01 if min_val <= 0 else 0))
-                    
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    sns.histplot(log_data, kde=True, ax=ax)
-                    ax.set_title(f"Distribution log-transformée de {element}")
-                    ax.set_xlabel(f"log({element})")
-                    ax.set_ylabel("Fréquence")
-                    st.pyplot(fig)
-        
-        elif analysis_type == "Analyse bivariée":
-            # Sélection des éléments à comparer
-            st.markdown("**Relation entre deux éléments**")
-            
-            x_element = st.selectbox("Élément X", elements, index=0)
-            y_element = st.selectbox("Élément Y", elements, index=min(1, len(elements)-1))
-            
-            # Sélection du type d'échantillons pour les échantillons normaux
-            if 'Type' in filtered_data.columns:
-                data_for_analysis = filtered_data[filtered_data['Type'] == 'Regular']
-            else:
-                data_for_analysis = filtered_data
-            
-            # Statistiques de corrélation
-            st.markdown("**Corrélation entre les éléments**")
-            
-            corr_col1, corr_col2 = st.columns(2)
-            
-            with corr_col1:
-                # Coefficients de corrélation
-                pearson_corr = data_for_analysis[x_element].corr(data_for_analysis[y_element], method='pearson')
-                spearman_corr = data_for_analysis[x_element].corr(data_for_analysis[y_element], method='spearman')
-                
-                st.metric("Corrélation de Pearson", f"{pearson_corr:.4f}")
-                st.metric("Corrélation de Spearman (rang)", f"{spearman_corr:.4f}")
-                
-                # Interprétation de la corrélation
-                if abs(pearson_corr) < 0.3:
-                    st.info("Corrélation faible")
-                elif abs(pearson_corr) < 0.7:
-                    st.info("Corrélation modérée")
-                else:
-                    st.info("Corrélation forte")
-            
-            with corr_col2:
-                # Teste si la corrélation est significative
-                from scipy import stats
-                
-                # Test de Pearson
-                pearson_test = stats.pearsonr(data_for_analysis[x_element], data_for_analysis[y_element])
-                spearman_test = stats.spearmanr(data_for_analysis[x_element], data_for_analysis[y_element])
-                
-                st.metric("P-value (Pearson)", f"{pearson_test.pvalue:.6f}")
-                st.metric("P-value (Spearman)", f"{spearman_test.pvalue:.6f}")
-                
-                # Interprétation de la signification
-                if pearson_test.pvalue < 0.05:
-                    st.success("Corrélation statistiquement significative (p < 0.05)")
-                else:
-                    st.warning("Corrélation non significative (p > 0.05)")
-            
-            # Visualisations bivariées
-            st.markdown("**Visualisations bivariées**")
-            
-            biv_col1, biv_col2 = st.columns(2)
-            
-            with biv_col1:
-                # Scatter plot avec ligne de régression
-                fig, ax = plt.subplots(figsize=(10, 6))
-                sns.regplot(x=x_element, y=y_element, data=data_for_analysis, ax=ax)
-                ax.set_title(f"{x_element} vs {y_element}")
-                ax.set_xlabel(x_element)
-                ax.set_ylabel(y_element)
-                st.pyplot(fig)
-            
-            with biv_col2:
-                # Scatter plot hexbin pour densité (utile pour grands jeux de données)
-                if len(data_for_analysis) > 100:
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    hb = ax.hexbin(data_for_analysis[x_element], data_for_analysis[y_element], 
-                                gridsize=20, cmap='viridis')
-                    ax.set_title(f"Densité de points {x_element} vs {y_element}")
-                    ax.set_xlabel(x_element)
-                    ax.set_ylabel(y_element)
-                    plt.colorbar(hb, ax=ax, label='Nombre de points')
-                    st.pyplot(fig)
-                
-                # Joinplot pour combiner distribution et corrélation
-                fig = sns.jointplot(x=x_element, y=y_element, data=data_for_analysis, kind='reg',
-                                   height=8, ratio=3, space=0.2)
-                fig.fig.suptitle(f"Distribution jointe de {x_element} et {y_element}", y=1.05)
-                st.pyplot(fig.fig)
-            
-            # Ajout d'une régression plus avancée
-            st.markdown("**Modèle de régression**")
-            
-            reg_type = st.selectbox(
-                "Type de régression",
-                ["Linéaire", "Polynomiale", "Logarithmique"]
-            )
-            
-            if reg_type == "Linéaire":
-                # Régression linéaire simple
-                from sklearn.linear_model import LinearRegression
-                from sklearn.metrics import r2_score, mean_squared_error
-                
-                X = data_for_analysis[x_element].values.reshape(-1, 1)
-                y = data_for_analysis[y_element].values
-                
-                model = LinearRegression()
-                model.fit(X, y)
-                
-                # Prédictions et métriques
-                y_pred = model.predict(X)
-                r2 = r2_score(y, y_pred)
-                rmse = np.sqrt(mean_squared_error(y, y_pred))
-                
-                # Afficher les résultats
-                st.markdown(f"**Équation: {y_element} = {model.coef_[0]:.4f} × {x_element} + {model.intercept_:.4f}**")
-                
-                reg_col1, reg_col2 = st.columns(2)
-                with reg_col1:
-                    st.metric("R² (coefficient de détermination)", f"{r2:.4f}")
-                with reg_col2:
-                    st.metric("RMSE (erreur quadratique moyenne)", f"{rmse:.4f}")
-                
-                # Visualisation de la régression
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.scatter(X, y, alpha=0.5)
-                ax.plot(X, y_pred, color='red', linewidth=2)
-                ax.set_title(f"Régression linéaire: {x_element} vs {y_element}")
-                ax.set_xlabel(x_element)
-                ax.set_ylabel(y_element)
-                st.pyplot(fig)
-            
-            elif reg_type == "Polynomiale":
-                # Régression polynomiale
-                from sklearn.preprocessing import PolynomialFeatures
-                from sklearn.linear_model import LinearRegression
-                from sklearn.metrics import r2_score, mean_squared_error
-                from sklearn.pipeline import make_pipeline
-                
-                degree = st.slider("Degré du polynôme", 2, 5, 2)
-                
-                X = data_for_analysis[x_element].values.reshape(-1, 1)
-                y = data_for_analysis[y_element].values
-                
-                model = make_pipeline(PolynomialFeatures(degree), LinearRegression())
-                model.fit(X, y)
-                
-                # Prédictions et métriques
-                y_pred = model.predict(X)
-                r2 = r2_score(y, y_pred)
-                rmse = np.sqrt(mean_squared_error(y, y_pred))
-                
-                # Afficher les résultats
-                st.markdown(f"**Régression polynomiale de degré {degree}**")
-                
-                reg_col1, reg_col2 = st.columns(2)
-                with reg_col1:
-                    st.metric("R² (coefficient de détermination)", f"{r2:.4f}")
-                with reg_col2:
-                    st.metric("RMSE (erreur quadratique moyenne)", f"{rmse:.4f}")
-                
-                # Visualisation de la régression
-                X_plot = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
-                y_plot = model.predict(X_plot)
-                
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.scatter(X, y, alpha=0.5)
-                ax.plot(X_plot, y_plot, color='red', linewidth=2)
-                ax.set_title(f"Régression polynomiale: {x_element} vs {y_element}")
-                ax.set_xlabel(x_element)
-                ax.set_ylabel(y_element)
-                st.pyplot(fig)
-            
-            elif reg_type == "Logarithmique":
-                # Régression logarithmique (log-log)
-                from sklearn.linear_model import LinearRegression
-                from sklearn.metrics import r2_score, mean_squared_error
-                
-                # Éviter log(0) ou log(négatif)
-                valid_indices = (data_for_analysis[x_element] > 0) & (data_for_analysis[y_element] > 0)
-                X = np.log(data_for_analysis[x_element][valid_indices].values).reshape(-1, 1)
-                y = np.log(data_for_analysis[y_element][valid_indices].values)
-                
-                if len(X) > 0:
-                    model = LinearRegression()
-                    model.fit(X, y)
-                    
-                    # Prédictions et métriques
-                    y_pred = model.predict(X)
-                    r2 = r2_score(y, y_pred)
-                    rmse = np.sqrt(mean_squared_error(y, y_pred))
-                    
-                    # Afficher les résultats
-                    st.markdown(f"**Équation: log({y_element}) = {model.coef_[0]:.4f} × log({x_element}) + {model.intercept_:.4f}**")
-                    st.markdown(f"**Forme: {y_element} = {np.exp(model.intercept_):.4f} × {x_element}^{model.coef_[0]:.4f}**")
-                    
-                    reg_col1, reg_col2 = st.columns(2)
-                    with reg_col1:
-                        st.metric("R² (coefficient de détermination)", f"{r2:.4f}")
-                    with reg_col2:
-                        st.metric("RMSE (erreur log-log)", f"{rmse:.4f}")
-                    
-                    # Visualisation de la régression
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    ax.scatter(np.exp(X), np.exp(y), alpha=0.5)
-                    
-                    # Courbe de régression
-                    X_plot = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
-                    y_plot = model.predict(X_plot)
-                    ax.plot(np.exp(X_plot), np.exp(y_plot), color='red', linewidth=2)
-                    
-                    ax.set_title(f"Régression logarithmique: {x_element} vs {y_element}")
-                    ax.set_xlabel(x_element)
-                    ax.set_ylabel(y_element)
-                    ax.set_xscale('log')
-                    ax.set_yscale('log')
-                    st.pyplot(fig)
-                else:
-                    st.warning("Impossible d'effectuer une régression logarithmique: certaines valeurs sont négatives ou nulles.")
-        
-        elif analysis_type == "Analyse spatiale":
-            # Analyse de la distribution spatiale
-            st.markdown("**Distribution spatiale des teneurs**")
-            
-            # Sélection de l'élément pour la visualisation
-            element = st.selectbox("Élément à visualiser", elements)
-            
-            # Créer une grille pour la visualisation
-            spatial_col1, spatial_col2 = st.columns(2)
-            
-            with spatial_col1:
-                # Carte de chaleur 2D (X-Y)
-                st.markdown("**Carte de chaleur X-Y**")
-                
-                # Créer une figure interactive avec Plotly
-                fig = px.density_heatmap(
-                    filtered_data, 
-                    x='X', 
-                    y='Y', 
-                    z=element,
-                    nbinsx=40, 
-                    nbinsy=40,
-                    color_continuous_scale=st.session_state.user_preferences['color_theme'],
-                    title=f"Distribution spatiale de {element} (vue en plan)"
-                )
-                fig.update_layout(height=500)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with spatial_col2:
-                # Visualisation 3D
-                st.markdown("**Visualisation 3D**")
-                
-                # Créer une figure 3D interactive
-                fig = px.scatter_3d(
-                    filtered_data, 
-                    x='X', 
-                    y='Y', 
-                    z='Z',
-                    color=element,
-                    color_continuous_scale=st.session_state.user_preferences['color_theme'],
-                    opacity=0.7,
-                    title=f"Distribution 3D de {element}"
-                )
-                fig.update_layout(height=700)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Sections et profils
-            st.markdown("**Sections et profils**")
-            
-            slice_type = st.radio(
-                "Type de section",
-                ["Section X", "Section Y", "Profil Z"]
-            )
-            
-            if slice_type == "Section X":
-                # Coupe verticale selon X
-                x_value = st.slider(
-                    "Position X de la section",
-                    float(filtered_data['X'].min()),
-                    float(filtered_data['X'].max()),
-                    (float(filtered_data['X'].min()) + float(filtered_data['X'].max()))/2
-                )
-                
-                # Créer un filtre pour sélectionner les points proches de la section
-                tolerance = (filtered_data['X'].max() - filtered_data['X'].min()) / 20
-                section_data = filtered_data[
-                    (filtered_data['X'] >= x_value - tolerance) &
-                    (filtered_data['X'] <= x_value + tolerance)
-                ]
-                
-                # Créer une visualisation de la section
-                fig = px.scatter(
-                    section_data,
-                    x='Y',
-                    y='Z',
-                    color=element,
-                    color_continuous_scale=st.session_state.user_preferences['color_theme'],
-                    title=f"Section à X={x_value:.2f}±{tolerance:.2f}",
-                    labels={'Y': 'Y', 'Z': 'Z'},
-                    height=500
-                )
-                fig.update_yaxes(autorange="reversed")  # Z positif vers le bas (convention minière)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            elif slice_type == "Section Y":
-                # Coupe verticale selon Y
-                y_value = st.slider(
-                    "Position Y de la section",
-                    float(filtered_data['Y'].min()),
-                    float(filtered_data['Y'].max()),
-                    (float(filtered_data['Y'].min()) + float(filtered_data['Y'].max()))/2
-                )
-                
-                # Créer un filtre pour sélectionner les points proches de la section
-                tolerance = (filtered_data['Y'].max() - filtered_data['Y'].min()) / 20
-                section_data = filtered_data[
-                    (filtered_data['Y'] >= y_value - tolerance) &
-                    (filtered_data['Y'] <= y_value + tolerance)
-                ]
-                
-                # Créer une visualisation de la section
-                fig = px.scatter(
-                    section_data,
-                    x='X',
-                    y='Z',
-                    color=element,
-                    color_continuous_scale=st.session_state.user_preferences['color_theme'],
-                    title=f"Section à Y={y_value:.2f}±{tolerance:.2f}",
-                    labels={'X': 'X', 'Z': 'Z'},
-                    height=500
-                )
-                fig.update_yaxes(autorange="reversed")  # Z positif vers le bas (convention minière)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            elif slice_type == "Profil Z":
-                # Coupe horizontale selon Z
-                z_value = st.slider(
-                    "Élévation Z du profil",
-                    float(filtered_data['Z'].min()),
-                    float(filtered_data['Z'].max()),
-                    (float(filtered_data['Z'].min()) + float(filtered_data['Z'].max()))/2
-                )
-                
-                # Créer un filtre pour sélectionner les points proches du profil
-                tolerance = abs(filtered_data['Z'].max() - filtered_data['Z'].min()) / 20
-                profile_data = filtered_data[
-                    (filtered_data['Z'] >= z_value - tolerance) &
-                    (filtered_data['Z'] <= z_value + tolerance)
-                ]
-                
-                # Créer une visualisation du profil
-                fig = px.scatter(
-                    profile_data,
-                    x='X',
-                    y='Y',
-                    color=element,
-                    color_continuous_scale=st.session_state.user_preferences['color_theme'],
-                    title=f"Profil à Z={z_value:.2f}±{tolerance:.2f}",
-                    labels={'X': 'X', 'Y': 'Y'},
-                    height=500
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Analyse de variographie simple
-            st.markdown("**Analyse de variabilité spatiale**")
-            
-            if st.checkbox("Afficher l'analyse de variabilité"):
-                # Distance moyenne entre points
-                from scipy.spatial.distance import pdist
-                
-                coords = filtered_data[['X', 'Y', 'Z']].values
-                distances = pdist(coords)
-                avg_dist = np.mean(distances)
-                median_dist = np.median(distances)
-                min_dist = np.min(distances)
-                max_dist = np.max(distances)
-                
-                st.markdown("**Distances entre échantillons**")
-                
-                dist_col1, dist_col2, dist_col3 = st.columns(3)
-                with dist_col1:
-                    st.metric("Distance moyenne", f"{avg_dist:.2f}")
-                with dist_col2:
-                    st.metric("Distance médiane", f"{median_dist:.2f}")
-                with dist_col3:
-                    st.metric("Étendue", f"{min_dist:.2f} - {max_dist:.2f}")
-                
-                # Histogramme des distances
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.hist(distances, bins=30)
-                ax.set_title("Distribution des distances entre échantillons")
-                ax.set_xlabel("Distance")
-                ax.set_ylabel("Fréquence")
-                st.pyplot(fig)
-                
-                # Analyse de continuité simplifiée
-                st.markdown("**Continuité spatiale**")
-                
-                # Calculer un proxy simplifié de la continuité spatiale
-                # (différences de valeurs en fonction de la distance)
-                if len(filtered_data) > 1 and len(filtered_data) <= 2000:  # Limiter pour performance
-                    pairs = []
-                    for i in range(len(filtered_data)):
-                        for j in range(i+1, min(i+20, len(filtered_data))):  # Limiter le nombre de paires
-                            row_i = filtered_data.iloc[i]
-                            row_j = filtered_data.iloc[j]
-                            
-                            # Calculer la distance 3D
-                            dist = np.sqrt(
-                                (row_i['X'] - row_j['X'])**2 +
-                                (row_i['Y'] - row_j['Y'])**2 +
-                                (row_i['Z'] - row_j['Z'])**2
-                            )
-                            
-                            # Différence de teneur
-                            diff = abs(row_i[element] - row_j[element])
-                            
-                            pairs.append((dist, diff))
-                    
-                    # Convertir en DataFrame pour faciliter la visualisation
-                    pairs_df = pd.DataFrame(pairs, columns=['Distance', 'Difference'])
-                    
-                    # Variogramme expérimental simplifié
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    ax.scatter(pairs_df['Distance'], pairs_df['Difference'], alpha=0.3)
-                    
-                    # Ajouter une ligne de tendance
-                    from scipy import stats
-                    slope, intercept, r_value, p_value, std_err = stats.linregress(
-                        pairs_df['Distance'], pairs_df['Difference'])
-                    
-                    x = np.linspace(pairs_df['Distance'].min(), pairs_df['Distance'].max(), 100)
-                    y = slope * x + intercept
-                    ax.plot(x, y, color='red', linestyle='--')
-                    
-                    ax.set_title(f"Variabilité de {element} en fonction de la distance")
-                    ax.set_xlabel("Distance entre échantillons")
-                    ax.set_ylabel(f"Différence absolue de {element}")
-                    st.pyplot(fig)
-                    
-                    # Interprétation
-                    if slope > 0:
-                        st.info(f"La variabilité de {element} tend à augmenter avec la distance (pente = {slope:.4f}), "
-                               f"ce qui suggère une continuité spatiale.")
-                    else:
-                        st.info(f"La variabilité de {element} ne montre pas de tendance claire avec la distance "
-                               f"(pente = {slope:.4f}), ce qui suggère une faible continuité spatiale.")
-                else:
-                    st.info("L'analyse de continuité n'est disponible que pour les jeux de données de taille modérée (2-2000 échantillons).")
-        
-        elif analysis_type == "Détection d'anomalies":
-            # Détection d'anomalies dans les données
-            st.markdown("**Détection d'anomalies multivariées**")
-            
-            # Sélection des éléments pour la détection d'anomalies
-            elements_for_anomaly = st.multiselect(
-                "Éléments à considérer pour la détection d'anomalies",
-                elements,
-                default=elements
-            )
-            
-            # Sélectionner uniquement les échantillons réguliers pour l'analyse
-            if 'Type' in filtered_data.columns:
-                data_for_anomaly = filtered_data[filtered_data['Type'] == 'Regular']
-            else:
-                data_for_anomaly = filtered_data
-            
-            # Méthode de détection
-            anomaly_method = st.selectbox(
-                "Méthode de détection",
-                ["Z-Score", "IQR (boîte à moustaches)", "Isolation Forest", "DBSCAN"]
-            )
-            
-            if anomaly_method == "Z-Score":
-                # Détection basée sur le Z-score
-                zscore_threshold = st.slider("Seuil de Z-score", 2.0, 5.0, 3.0, 0.1)
-                
-                # Calculer les Z-scores pour chaque élément
-                anomaly_scores = pd.DataFrame(index=data_for_anomaly.index)
-                
-                for element in elements_for_anomaly:
-                    mean_val = data_for_anomaly[element].mean()
-                    std_val = data_for_anomaly[element].std()
-                    
-                    if std_val > 0:  # Éviter division par zéro
-                        anomaly_scores[f'{element}_zscore'] = abs((data_for_anomaly[element] - mean_val) / std_val)
-                    else:
-                        anomaly_scores[f'{element}_zscore'] = 0
-                
-                # Calculer le score maximum parmi tous les éléments
-                anomaly_scores['max_zscore'] = anomaly_scores.max(axis=1)
-                
-                # Identifier les anomalies
-                anomalies = data_for_anomaly[anomaly_scores['max_zscore'] > zscore_threshold].copy()
-                anomalies['Anomaly_Score'] = anomaly_scores.loc[anomalies.index, 'max_zscore']
-                
-                # Ajouter le score d'anomalie au DataFrame original
-                data_with_scores = data_for_anomaly.copy()
-                data_with_scores['Anomaly_Score'] = anomaly_scores['max_zscore']
-                data_with_scores['Is_Anomaly'] = anomaly_scores['max_zscore'] > zscore_threshold
-            
-            elif anomaly_method == "IQR (boîte à moustaches)":
-                # Détection basée sur la méthode IQR
-                iqr_multiplier = st.slider("Multiplicateur IQR", 1.0, 3.0, 1.5, 0.1)
-                
-                # Calculer les scores d'anomalie pour chaque élément
-                anomaly_scores = pd.DataFrame(index=data_for_anomaly.index)
-                
-                for element in elements_for_anomaly:
-                    q1 = data_for_anomaly[element].quantile(0.25)
-                    q3 = data_for_anomaly[element].quantile(0.75)
-                    iqr = q3 - q1
-                    
-                    if iqr > 0:  # Éviter division par zéro
-                        lower_bound = q1 - iqr_multiplier * iqr
-                        upper_bound = q3 + iqr_multiplier * iqr
-                        
-                        # Calculer un score normalisé basé sur la distance aux bornes
-                        # 0 si dans les limites, sinon distance normalisée par IQR
-                        values = data_for_anomaly[element].values
-                        scores = np.zeros_like(values, dtype=float)
-                        
-                        # Pour les valeurs supérieures à la borne supérieure
-                        mask_upper = values > upper_bound
-                        if np.any(mask_upper):
-                            scores[mask_upper] = (values[mask_upper] - upper_bound) / iqr
-                        
-                        # Pour les valeurs inférieures à la borne inférieure
-                        mask_lower = values < lower_bound
-                        if np.any(mask_lower):
-                            scores[mask_lower] = (lower_bound - values[mask_lower]) / iqr
-                        
-                        anomaly_scores[f'{element}_iqr_score'] = scores
-                    else:
-                        anomaly_scores[f'{element}_iqr_score'] = 0
-                
-                # Calculer le score maximum parmi tous les éléments
-                anomaly_scores['max_iqr_score'] = anomaly_scores.max(axis=1)
-                
-                # Identifier les anomalies
-                anomalies = data_for_anomaly[anomaly_scores['max_iqr_score'] > 0].copy()
-                anomalies['Anomaly_Score'] = anomaly_scores.loc[anomalies.index, 'max_iqr_score']
-                
-                # Ajouter le score d'anomalie au DataFrame original
-                data_with_scores = data_for_anomaly.copy()
-                data_with_scores['Anomaly_Score'] = anomaly_scores['max_iqr_score']
-                data_with_scores['Is_Anomaly'] = anomaly_scores['max_iqr_score'] > 0
-            
-            elif anomaly_method == "Isolation Forest":
-                # Détection basée sur Isolation Forest
-                from sklearn.ensemble import IsolationForest
-                
-                contamination = st.slider("Contamination estimée", 0.01, 0.2, 0.05, 0.01)
-                
-                # Préparer les données pour l'algorithme
-                X = data_for_anomaly[elements_for_anomaly].values
-                
-                # Ajuster le modèle
-                model = IsolationForest(contamination=contamination, random_state=42)
-                model.fit(X)
-                
-                # Prédire les anomalies
-                # -1 pour anomalie, 1 pour normal
-                y_pred = model.predict(X)
-                
-                # Calculer les scores d'anomalie
-                scores = -model.decision_function(X)  # Négatif pour que les valeurs élevées soient des anomalies
-                
-                # Identifier les anomalies
-                anomalies = data_for_anomaly[y_pred == -1].copy()
-                anomalies['Anomaly_Score'] = scores[y_pred == -1]
-                
-                # Ajouter le score d'anomalie au DataFrame original
-                data_with_scores = data_for_anomaly.copy()
-                data_with_scores['Anomaly_Score'] = scores
-                data_with_scores['Is_Anomaly'] = y_pred == -1
-            
-            elif anomaly_method == "DBSCAN":
-                # Détection basée sur DBSCAN
-                from sklearn.cluster import DBSCAN
-                from sklearn.preprocessing import StandardScaler
-                
-                eps = st.slider("Distance maximale (eps)", 0.1, 2.0, 0.5, 0.1)
-                min_samples = st.slider("Nombre minimal d'échantillons", 3, 20, 5)
-                
-                # Préparer les données pour l'algorithme
-                X = data_for_anomaly[elements_for_anomaly].values
-                
-                # Standardiser les données
-                X_scaled = StandardScaler().fit_transform(X)
-                
-                # Ajuster le modèle
-                model = DBSCAN(eps=eps, min_samples=min_samples)
-                y_pred = model.fit_predict(X_scaled)
-                
-                # Les points avec label -1 sont considérés comme des anomalies
-                anomalies = data_for_anomaly[y_pred == -1].copy()
-                
-                # Calculer une mesure de distance comme score d'anomalie
-                from sklearn.neighbors import NearestNeighbors
-                
-                # Trouver les k plus proches voisins pour calculer une distance moyenne
-                k = min(10, len(X_scaled) - 1)
-                nn = NearestNeighbors(n_neighbors=k+1)  # +1 car le point lui-même est inclus
-                nn.fit(X_scaled)
-                distances, _ = nn.kneighbors(X_scaled)
-                
-                # Utiliser la distance moyenne aux k plus proches voisins comme score d'anomalie
-                scores = np.mean(distances[:, 1:], axis=1)  # Exclure le point lui-même (distance 0)
-                
-                # Normaliser les scores pour faciliter l'interprétation
-                if np.std(scores) > 0:
-                    scores = (scores - np.min(scores)) / (np.max(scores) - np.min(scores))
-                
-                # Ajouter les scores aux anomalies
-                anomalies['Anomaly_Score'] = scores[y_pred == -1]
-                
-                # Ajouter le score d'anomalie au DataFrame original
-                data_with_scores = data_for_anomaly.copy()
-                data_with_scores['Anomaly_Score'] = scores
-                data_with_scores['Is_Anomaly'] = y_pred == -1
-            
-            # Afficher les résultats
-            st.markdown(f"**{len(anomalies)} anomalies détectées** ({len(anomalies)/len(data_for_anomaly)*100:.1f}% des données)")
-            
-            # Afficher les anomalies triées par score d'anomalie
-            if len(anomalies) > 0:
-                st.dataframe(anomalies.sort_values(by='Anomaly_Score', ascending=False))
-                
-                # Visualisation des anomalies
-                viz_col1, viz_col2 = st.columns(2)
-                
-                with viz_col1:
-                    # Distribution des scores d'anomalie
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    sns.histplot(data_with_scores['Anomaly_Score'], kde=True, ax=ax)
-                    if anomaly_method == "Z-Score":
-                        ax.axvline(zscore_threshold, color='red', linestyle='--', 
-                                 label=f'Seuil ({zscore_threshold})')
-                    ax.set_title(f"Distribution des scores d'anomalie ({anomaly_method})")
-                    ax.set_xlabel("Score d'anomalie")
-                    ax.set_ylabel("Fréquence")
-                    if anomaly_method == "Z-Score":
-                        ax.legend()
-                    st.pyplot(fig)
-                
-                with viz_col2:
-                    # Visualisation 3D avec anomalies en surbrillance
-                    if len(elements_for_anomaly) >= 2:
-                        # Sélectionner les deux premiers éléments pour la visualisation
-                        elem1 = elements_for_anomaly[0]
-                        elem2 = elements_for_anomaly[1]
-                        
-                        fig = go.Figure()
-                        
-                        # Points normaux
-                        fig.add_trace(go.Scatter3d(
-                            x=data_with_scores[~data_with_scores['Is_Anomaly']]['X'],
-                            y=data_with_scores[~data_with_scores['Is_Anomaly']]['Y'],
-                            z=data_with_scores[~data_with_scores['Is_Anomaly']]['Z'],
-                            mode='markers',
-                            marker=dict(
-                                size=4,
-                                color='blue',
-                                opacity=0.6
-                            ),
-                            name='Normal'
-                        ))
-                        
-                        # Anomalies
-                        fig.add_trace(go.Scatter3d(
-                            x=data_with_scores[data_with_scores['Is_Anomaly']]['X'],
-                            y=data_with_scores[data_with_scores['Is_Anomaly']]['Y'],
-                            z=data_with_scores[data_with_scores['Is_Anomaly']]['Z'],
-                            mode='markers',
-                            marker=dict(
-                                size=6,
-                                color='red',
-                                opacity=0.8
-                            ),
-                            name='Anomalie'
-                        ))
-                        
-                        fig.update_layout(
-                            title=f"Anomalies détectées dans l'espace 3D",
-                            scene=dict(
-                                xaxis_title='X',
-                                yaxis_title='Y',
-                                zaxis_title='Z'
-                            ),
-                            height=600
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                # Graphique de dispersion avec les deux principaux éléments
-                if len(elements_for_anomaly) >= 2:
-                    st.markdown("**Représentation des anomalies dans l'espace des éléments**")
-                    
-                    # Sélectionner les deux premiers éléments pour la visualisation
-                    elem1 = elements_for_anomaly[0]
-                    elem2 = elements_for_anomaly[1]
-                    
-                    fig, ax = plt.subplots(figsize=(10, 8))
-                    
-                    # Points normaux
-                    ax.scatter(
-                        data_with_scores[~data_with_scores['Is_Anomaly']][elem1],
-                        data_with_scores[~data_with_scores['Is_Anomaly']][elem2],
-                        color='blue',
-                        alpha=0.6,
-                        label='Normal'
-                    )
-                    
-                    # Anomalies
-                    scatter = ax.scatter(
-                        data_with_scores[data_with_scores['Is_Anomaly']][elem1],
-                        data_with_scores[data_with_scores['Is_Anomaly']][elem2],
-                        color='red',
-                        alpha=0.8,
-                        label='Anomalie',
-                        s=data_with_scores[data_with_scores['Is_Anomaly']]['Anomaly_Score'] * 30 + 30
-                    )
-                    
-                    ax.set_title(f"{elem1} vs {elem2} avec anomalies")
-                    ax.set_xlabel(elem1)
-                    ax.set_ylabel(elem2)
-                    ax.legend()
-                    
-                    st.pyplot(fig)
-                
-                # Exporter les résultats
-                st.markdown("**Exporter les résultats de détection d'anomalies**")
-                
-                export_data = data_with_scores.copy()
-                
-                excel_file = BytesIO()
-                with pd.ExcelWriter(excel_file, engine='xlsxwriter') as writer:
-                    export_data.to_excel(writer, sheet_name='All Data', index=False)
-                    anomalies.to_excel(writer, sheet_name='Anomalies', index=False)
-                
-                excel_file.seek(0)
-                b64 = base64.b64encode(excel_file.read()).decode()
-                href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="anomaly_detection.xlsx">Télécharger les résultats d\'anomalies (XLSX)</a>'
-                st.markdown(href, unsafe_allow_html=True)
-            else:
-                st.info("Aucune anomalie détectée avec les paramètres actuels.")
+        st.success("Fonctionnalité avancée disponible dans la version complète.")
+        st.info("Cette version simplifiée inclut uniquement la génération de données de base pour assurer la compatibilité maximale avec Streamlit Cloud.")
 
 with tab_compare:
     st.header("Comparaison avec Données Réelles")
     
-    # Option pour télécharger des données réelles
-    st.subheader("Télécharger des données réelles")
-    
-    uploaded_file = st.file_uploader("Choisir un fichier CSV ou Excel", type=["csv", "xlsx", "xls"])
-    
-    if uploaded_file is not None:
-        # Charger les données téléchargées
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                uploaded_data = pd.read_csv(uploaded_file)
-            else:
-                uploaded_data = pd.read_excel(uploaded_file)
-            
-            st.session_state.uploaded_data = uploaded_data
-            st.session_state.comparison_mode = True
-            
-            # Afficher un aperçu des données téléchargées
-            st.markdown("**Aperçu des données téléchargées**")
-            st.dataframe(uploaded_data.head())
-            
-            # Cartographie des colonnes
-            st.subheader("Cartographie des colonnes")
-            st.markdown("Associez les colonnes de vos données téléchargées aux colonnes attendues par l'application.")
-            
-            # Colonnes requises pour la comparaison
-            required_cols = ['Sample_ID', 'X', 'Y', 'Z'] + st.session_state.elements
-            
-            # Créer un mapping pour chaque colonne requise
-            col_mapping = {}
-            
-            # Utiliser des colonnes pour un affichage plus compact
-            mapping_cols = st.columns(4)
-            
-            for i, col in enumerate(required_cols):
-                with mapping_cols[i % 4]:
-                    col_options = [''] + list(uploaded_data.columns)
-                    default_index = 0
-                    
-                    # Essayer de trouver une correspondance automatique
-                    for j, opt in enumerate(col_options):
-                        if opt.lower() == col.lower() or opt.lower().replace('_', '') == col.lower().replace('_', ''):
-                            default_index = j
-                            break
-                    
-                    col_mapping[col] = st.selectbox(
-                        f"Colonne pour {col}",
-                        col_options,
-                        index=default_index,
-                        key=f"map_{col}"
-                    )
-            
-            # Bouton pour effectuer la comparaison
-            if st.button("Effectuer la comparaison"):
-                # Vérifier si toutes les colonnes requises ont été mappées
-                if '' in col_mapping.values():
-                    st.error("Toutes les colonnes requises doivent être mappées.")
-                else:
-                    # Créer un DataFrame mappé
-                    mapped_data = pd.DataFrame()
-                    
-                    for target_col, source_col in col_mapping.items():
-                        mapped_data[target_col] = uploaded_data[source_col]
-                    
-                    # Ajouter Type si disponible
-                    if 'Type' in uploaded_data.columns:
-                        mapped_data['Type'] = uploaded_data['Type']
-                    
-                    # Enregistrer les données mappées
-                    st.session_state.mapped_data = mapped_data
-                    
-                    # Analyser les données téléchargées
-                    with st.spinner("Analyse des données en cours..."):
-                        analysis = analyze_uploaded_data(mapped_data, st.session_state.elements)
-                        st.session_state.analysis = analysis
-                    
-                    # Afficher les résultats de la comparaison
-                    st.subheader("Résultats de la comparaison")
-                    
-                    # Comparer les statistiques descriptives
-                    st.markdown("**Comparaison des statistiques descriptives**")
-                    
-                    # Données générées (si disponibles)
-                    if st.session_state.data_generated:
-                        generated_data = st.session_state.all_data
-                        
-                        # Créer un DataFrame pour la comparaison
-                        comparison = pd.DataFrame()
-                        
-                        # Statistiques pour les données générées
-                        gen_stats = generated_data[st.session_state.elements].describe()
-                        
-                        # Statistiques pour les données téléchargées
-                        real_stats = mapped_data[st.session_state.elements].describe()
-                        
-                        # Afficher les statistiques côte à côte
-                        comp_col1, comp_col2 = st.columns(2)
-                        
-                        with comp_col1:
-                            st.markdown("**Données générées**")
-                            st.dataframe(gen_stats)
-                        
-                        with comp_col2:
-                            st.markdown("**Données réelles**")
-                            st.dataframe(real_stats)
-                        
-                        # Comparer les distributions
-                        st.markdown("**Comparaison des distributions**")
-                        
-                        for element in st.session_state.elements:
-                            st.markdown(f"**Distribution de {element}**")
-                            
-                            fig, axs = plt.subplots(1, 2, figsize=(15, 6))
-                            
-                            # Distribution des données générées
-                            sns.histplot(
-                                generated_data[generated_data['Type'] == 'Regular'][element] 
-                                    if 'Type' in generated_data.columns else generated_data[element],
-                                kde=True, 
-                                ax=axs[0]
-                            )
-                            axs[0].set_title(f"Données générées: {element}")
-                            
-                            # Distribution des données réelles
-                            sns.histplot(
-                                mapped_data[mapped_data['Type'] == 'Regular'][element] 
-                                    if 'Type' in mapped_data.columns else mapped_data[element],
-                                kde=True, 
-                                ax=axs[1]
-                            )
-                            axs[1].set_title(f"Données réelles: {element}")
-                            
-                            st.pyplot(fig)
-                        
-                        # QQ-plots pour comparer les distributions
-                        st.markdown("**QQ-Plots (comparaison quantile-quantile)**")
-                        
-                        for element in st.session_state.elements:
-                            fig, ax = plt.subplots(figsize=(10, 10))
-                            
-                            # Extraire les données
-                            gen_data = generated_data[generated_data['Type'] == 'Regular'][element] if 'Type' in generated_data.columns else generated_data[element]
-                            real_data = mapped_data[mapped_data['Type'] == 'Regular'][element] if 'Type' in mapped_data.columns else mapped_data[element]
-                            
-                            # Calculer les quantiles
-                            gen_quantiles = np.quantile(gen_data, np.linspace(0, 1, 100))
-                            real_quantiles = np.quantile(real_data, np.linspace(0, 1, 100))
-                            
-                            # Tracer le QQ-plot
-                            ax.scatter(gen_quantiles, real_quantiles)
-                            
-                            # Ajouter une ligne de référence
-                            min_val = min(gen_quantiles.min(), real_quantiles.min())
-                            max_val = max(gen_quantiles.max(), real_quantiles.max())
-                            ax.plot([min_val, max_val], [min_val, max_val], 'r--')
-                            
-                            ax.set_title(f"QQ-Plot pour {element}")
-                            ax.set_xlabel("Quantiles des données générées")
-                            ax.set_ylabel("Quantiles des données réelles")
-                            
-                            st.pyplot(fig)
-                        
-                        # Comparer les corrélations
-                        st.markdown("**Comparaison des corrélations**")
-                        
-                        # Données générées
-                        gen_corr = generated_data[generated_data['Type'] == 'Regular'][st.session_state.elements].corr() if 'Type' in generated_data.columns else generated_data[st.session_state.elements].corr()
-                        
-                        # Données réelles
-                        real_corr = mapped_data[mapped_data['Type'] == 'Regular'][st.session_state.elements].corr() if 'Type' in mapped_data.columns else mapped_data[st.session_state.elements].corr()
-                        
-                        # Afficher les matrices côte à côte
-                        corr_col1, corr_col2 = st.columns(2)
-                        
-                        with corr_col1:
-                            st.markdown("**Corrélations des données générées**")
-                            fig, ax = plt.subplots(figsize=(10, 8))
-                            sns.heatmap(gen_corr, annot=True, cmap='coolwarm', ax=ax)
-                            st.pyplot(fig)
-                        
-                        with corr_col2:
-                            st.markdown("**Corrélations des données réelles**")
-                            fig, ax = plt.subplots(figsize=(10, 8))
-                            sns.heatmap(real_corr, annot=True, cmap='coolwarm', ax=ax)
-                            st.pyplot(fig)
-                        
-                        # Calculer la différence entre les matrices
-                        corr_diff = gen_corr - real_corr
-                        
-                        st.markdown("**Différence entre les matrices de corrélation**")
-                        fig, ax = plt.subplots(figsize=(10, 8))
-                        sns.heatmap(corr_diff, annot=True, cmap='coolwarm', ax=ax)
-                        ax.set_title("Différence (générée - réelle)")
-                        st.pyplot(fig)
-                        
-                        # Comparer les statistiques spatiales
-                        st.markdown("**Comparaison de la distribution spatiale**")
-                        
-                        # Sélectionner un élément pour la visualisation
-                        element = st.selectbox("Élément à visualiser", st.session_state.elements)
-                        
-                        spatial_col1, spatial_col2 = st.columns(2)
-                        
-                        with spatial_col1:
-                            st.markdown("**Distribution spatiale des données générées**")
-                            fig = px.scatter_3d(
-                                generated_data[generated_data['Type'] == 'Regular'] if 'Type' in generated_data.columns else generated_data,
-                                x='X',
-                                y='Y',
-                                z='Z',
-                                color=element,
-                                opacity=0.7,
-                                color_continuous_scale=st.session_state.user_preferences['color_theme']
-                            )
-                            fig.update_layout(height=600)
-                            st.plotly_chart(fig, use_container_width=True)
-                        
-                        with spatial_col2:
-                            st.markdown("**Distribution spatiale des données réelles**")
-                            fig = px.scatter_3d(
-                                mapped_data[mapped_data['Type'] == 'Regular'] if 'Type' in mapped_data.columns else mapped_data,
-                                x='X',
-                                y='Y',
-                                z='Z',
-                                color=element,
-                                opacity=0.7,
-                                color_continuous_scale=st.session_state.user_preferences['color_theme']
-                            )
-                            fig.update_layout(height=600)
-                            st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Générer un rapport de comparaison
-                        st.subheader("Rapport de comparaison")
-                        
-                        if st.button("Générer un rapport de comparaison PDF"):
-                            with st.spinner("Génération du rapport en cours..."):
-                                # Configuration pour le rapport
-                                config = st.session_state.config if 'config' in st.session_state else {
-                                    'sample_count': len(generated_data),
-                                    'distribution_type': 'N/A',
-                                    'include_anomalies': False,
-                                    'anomaly_percent': 0,
-                                    'include_qaqc': 'Type' in generated_data.columns,
-                                    'color_theme': st.session_state.user_preferences['color_theme']
-                                }
-                                
-                                # Générer le rapport PDF avec données de comparaison
-                                pdf_file = generate_pdf_report(
-                                    generated_data, 
-                                    st.session_state.elements, 
-                                    config, 
-                                    analysis=analysis,
-                                    comparison={
-                                        'basic_stats': real_stats
-                                    }
-                                )
-                                
-                                # Lire le fichier PDF généré
-                                with open(pdf_file, "rb") as f:
-                                    pdf_bytes = f.read()
-                                
-                                # Créer un lien de téléchargement
-                                b64_pdf = base64.b64encode(pdf_bytes).decode()
-                                href_pdf = f'<a href="data:application/pdf;base64,{b64_pdf}" download="mining_data_comparison_report.pdf">Télécharger le rapport de comparaison PDF</a>'
-                                st.markdown(href_pdf, unsafe_allow_html=True)
-                    else:
-                        st.warning("Veuillez d'abord générer des données dans l'onglet 'Générer' pour effectuer une comparaison complète.")
-        except Exception as e:
-            st.error(f"Erreur lors du chargement du fichier: {e}")
+    # Vérifier si des données sont disponibles
+    if not st.session_state.data_generated:
+        st.info("Veuillez d'abord générer des données dans l'onglet 'Générer'.")
+    else:
+        st.success("Fonctionnalité avancée disponible dans la version complète.")
+        st.info("Cette version simplifiée inclut uniquement la génération de données de base pour assurer la compatibilité maximale avec Streamlit Cloud.")
 
 with tab_settings:
     st.header("Paramètres et Préférences")
     
-    # Onglets pour les différentes catégories de paramètres
-    settings_tab1, settings_tab2, settings_tab3 = st.tabs(["Préférences générales", "Exportation", "Profils utilisateur"])
+    # Préférences générales
+    st.subheader("Préférences générales")
     
-    with settings_tab1:
-        st.subheader("Préférences générales")
-        
-        # Interface utilisateur
-        st.markdown("**Interface utilisateur**")
-        
-        ui_col1, ui_col2 = st.columns(2)
-        
-        with ui_col1:
-            dark_mode = st.checkbox("Mode sombre", st.session_state.user_preferences.get('dark_mode', False))
-            st.session_state.user_preferences['dark_mode'] = dark_mode
-        
-        with ui_col2:
-            color_theme = st.selectbox(
-                "Thème de couleur par défaut",
-                ["viridis", "plasma", "inferno", "magma", "cividis", "mako", "rocket", "turbo"],
-                index=["viridis", "plasma", "inferno", "magma", "cividis", "mako", "rocket", "turbo"].index(st.session_state.user_preferences['color_theme'])
-            )
-            st.session_state.user_preferences['color_theme'] = color_theme
-        
-        # Paramètres de données par défaut
-        st.markdown("**Paramètres de données par défaut**")
-        
-        data_col1, data_col2 = st.columns(2)
-        
-        with data_col1:
-            default_elements = st.text_input(
-                "Éléments par défaut (séparés par des virgules)",
-                st.session_state.user_preferences['default_elements']
-            )
-            st.session_state.user_preferences['default_elements'] = default_elements
-            
-            default_distribution = st.selectbox(
-                "Distribution par défaut",
-                ["Normal", "Log-normale", "Uniforme", "Corrélée"],
-                index=["Normal", "Log-normale", "Uniforme", "Corrélée"].index(st.session_state.user_preferences['default_distribution'])
-            )
-            st.session_state.user_preferences['default_distribution'] = default_distribution
-        
-        with data_col2:
-            default_sample_count = st.number_input(
-                "Nombre d'échantillons par défaut",
-                100, 10000, 
-                st.session_state.user_preferences['default_sample_count']
-            )
-            st.session_state.user_preferences['default_sample_count'] = default_sample_count
-            
-            include_qaqc = st.checkbox(
-                "Inclure données QAQC par défaut", 
-                st.session_state.user_preferences['include_qaqc']
-            )
-            st.session_state.user_preferences['include_qaqc'] = include_qaqc
-            
-            include_anomalies = st.checkbox(
-                "Inclure anomalies par défaut", 
-                st.session_state.user_preferences['include_anomalies']
-            )
-            st.session_state.user_preferences['include_anomalies'] = include_anomalies
-        
-        # Bouton pour sauvegarder les paramètres
-        if st.button("Appliquer les préférences"):
-            st.success("Préférences mises à jour avec succès!")
+    # Interface utilisateur
+    st.markdown("**Interface utilisateur**")
     
-    with settings_tab2:
-        st.subheader("Options d'exportation")
-        
-        # Format d'exportation préféré
-        st.markdown("**Format de fichier préféré**")
-        
-        export_format = st.radio(
-            "Format d'exportation par défaut",
-            ["CSV", "Excel (XLSX)", "Les deux"],
-            index=2
+    ui_col1, ui_col2 = st.columns(2)
+    
+    with ui_col1:
+        color_theme = st.selectbox(
+            "Thème de couleur par défaut",
+            ["viridis", "plasma", "inferno", "magma", "cividis", "mako", "rocket", "turbo"],
+            index=["viridis", "plasma", "inferno", "magma", "cividis", "mako", "rocket", "turbo"].index(st.session_state.user_preferences.get('color_theme', 'viridis'))
         )
-        st.session_state.user_preferences['export_format'] = export_format
-        
-        # Options avancées d'exportation
-        st.markdown("**Options avancées d'exportation**")
-        
-        adv_export_col1, adv_export_col2 = st.columns(2)
-        
-        with adv_export_col1:
-            excel_sheets = st.multiselect(
-                "Feuilles Excel à inclure par défaut",
-                ["Toutes les données", "Échantillons réguliers", "CRM", "Duplicatas", "Blancs", "Statistiques"],
-                ["Toutes les données", "Échantillons réguliers", "CRM", "Duplicatas", "Blancs"]
-            )
-            st.session_state.user_preferences['excel_sheets'] = excel_sheets
-        
-        with adv_export_col2:
-            csv_delimiter = st.selectbox(
-                "Délimiteur CSV",
-                [",", ";", "Tab"],
-                index=0
-            )
-            st.session_state.user_preferences['csv_delimiter'] = csv_delimiter
-            
-            include_header = st.checkbox("Inclure en-têtes dans les CSV", True)
-            st.session_state.user_preferences['include_header'] = include_header
+        st.session_state.user_preferences['color_theme'] = color_theme
     
-    with settings_tab3:
-        st.subheader("Gestion des profils utilisateur")
+    # Paramètres de données par défaut
+    st.markdown("**Paramètres de données par défaut**")
+    
+    data_col1, data_col2 = st.columns(2)
+    
+    with data_col1:
+        default_elements = st.text_input(
+            "Éléments par défaut (séparés par des virgules)",
+            st.session_state.user_preferences['default_elements']
+        )
+        st.session_state.user_preferences['default_elements'] = default_elements
         
-        # Sauvegarder les préférences actuelles
-        st.markdown("**Exporter les préférences actuelles**")
+        default_distribution = st.selectbox(
+            "Distribution par défaut",
+            ["Normal", "Log-normale", "Uniforme", "Corrélée"],
+            index=["Normal", "Log-normale", "Uniforme", "Corrélée"].index(st.session_state.user_preferences['default_distribution'])
+        )
+        st.session_state.user_preferences['default_distribution'] = default_distribution
+    
+    with data_col2:
+        default_sample_count = st.number_input(
+            "Nombre d'échantillons par défaut",
+            100, 10000, 
+            st.session_state.user_preferences['default_sample_count']
+        )
+        st.session_state.user_preferences['default_sample_count'] = default_sample_count
         
-        st.markdown(save_preferences(), unsafe_allow_html=True)
+        include_qaqc = st.checkbox(
+            "Inclure données QAQC par défaut", 
+            st.session_state.user_preferences['include_qaqc']
+        )
+        st.session_state.user_preferences['include_qaqc'] = include_qaqc
         
-        # Charger des préférences
-        st.markdown("**Importer des préférences**")
-        
-        pref_file = st.file_uploader("Charger un fichier de préférences", type=["json"])
-        
-        if pref_file is not None:
-            if load_preferences(pref_file):
-                st.success("Préférences chargées avec succès!")
-        
-        # Réinitialiser les préférences
-        st.markdown("**Réinitialiser les préférences**")
-        
-        if st.button("Restaurer les paramètres par défaut"):
-            st.session_state.user_preferences = {
-                'default_elements': "Au,Cu,Ag,Pb,Zn",
-                'default_sample_count': 1000,
-                'default_distribution': "Log-normale",
-                'color_theme': "viridis",
-                'include_qaqc': True,
-                'include_anomalies': False,
-                'dark_mode': False
-            }
-            st.success("Préférences réinitialisées aux valeurs par défaut!")
+        include_anomalies = st.checkbox(
+            "Inclure anomalies par défaut", 
+            st.session_state.user_preferences['include_anomalies']
+        )
+        st.session_state.user_preferences['include_anomalies'] = include_anomalies
+    
+    # Bouton pour sauvegarder les paramètres
+    if st.button("Appliquer les préférences"):
+        st.success("Préférences mises à jour avec succès!")
+    
+    # Exporter/importer préférences
+    st.subheader("Gestion des profils utilisateur")
+    
+    # Sauvegarder les préférences actuelles
+    st.markdown("**Exporter les préférences actuelles**")
+    
+    st.markdown(save_preferences(), unsafe_allow_html=True)
+    
+    # Charger des préférences
+    st.markdown("**Importer des préférences**")
+    
+    pref_file = st.file_uploader("Charger un fichier de préférences", type=["json"])
+    
+    if pref_file is not None:
+        if load_preferences(pref_file):
+            st.success("Préférences chargées avec succès!")
     
     # Informations sur l'application
     st.subheader("À propos de cette application")
     
     st.markdown("""
-    ### Générateur de Données Minières Avancé
+    ### Générateur de Données Minières
     
-    **Version:** 2.0
+    **Version:** 1.0 (version simplifiée)
     
     **Fonctionnalités principales:**
     - Génération de données synthétiques pour l'industrie minière
-    - Analyse statistique avancée et détection d'anomalies
-    - Comparaison avec des données réelles téléchargées
-    - Génération de rapports PDF détaillés
-    - Personnalisation complète des préférences utilisateur
+    - Visualisation de base des données générées
+    - Exportation des données en CSV et Excel
+    - Rapport HTML basique
     
     **Développé par GeoDataTools**
     
-    **Contact:** contact@geodatatools.com
-    
-    **Site web:** www.geodatatools.com
-    
-    © 2025 - Tous droits réservés
+    © 2023 - Tous droits réservés
     """)
-
-# Nettoyer les fichiers temporaires au moment de quitter l'application
-atexit.register(cleanup_temp_files)
