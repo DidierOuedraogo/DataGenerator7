@@ -14,17 +14,10 @@ import json
 import tempfile
 import os
 import time
+import atexit
 
-# Pour les rapports PDF
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Image, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.graphics import renderPDF
-from svglib.svglib import svg2rlg
-import matplotlib
-matplotlib.use('Agg')  # Utiliser le backend non-interactif
+# Pour les rapports PDF avec FPDF2
+from fpdf import FPDF
 
 # Configuration de la page
 st.set_page_config(
@@ -338,10 +331,10 @@ def analyze_uploaded_data(uploaded_df, elements):
     
     return analysis
 
-# Fonction pour générer un rapport PDF
+# Fonction pour générer un rapport PDF avec FPDF2
 def generate_pdf_report(data, elements, config, analysis=None, comparison=None):
     """
-    Génère un rapport PDF détaillé des données générées.
+    Génère un rapport PDF détaillé des données générées en utilisant FPDF2.
     """
     # Créer un fichier temporaire pour le PDF
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
@@ -351,24 +344,25 @@ def generate_pdf_report(data, elements, config, analysis=None, comparison=None):
     # Ajouter le fichier à la liste des fichiers temporaires
     st.session_state.temp_files.append(temp_filename)
     
-    # Créer un document PDF
-    doc = SimpleDocTemplate(temp_filename, pagesize=A4)
-    story = []
+    # Créer un nouveau PDF
+    pdf = FPDF()
+    pdf.add_page()
     
-    # Styles
-    styles = getSampleStyleSheet()
-    title_style = styles["Title"]
-    heading_style = styles["Heading1"]
-    subheading_style = styles["Heading2"]
-    normal_style = styles["Normal"]
+    # Définir les styles
+    pdf.set_font("Arial", "B", 16)
     
-    # Ajouter titre et date
-    story.append(Paragraph("Rapport de Données Minières Synthétiques", title_style))
-    story.append(Paragraph(f"Généré le: {datetime.now().strftime('%Y-%m-%d %H:%M')}", normal_style))
-    story.append(Spacer(1, 0.5*inch))
+    # Titre et date
+    pdf.cell(0, 10, "Rapport de Données Minières Synthétiques", 0, 1, "C")
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 10, f"Généré le: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 0, 1)
+    pdf.ln(5)
     
     # Configuration utilisée
-    story.append(Paragraph("Configuration", heading_style))
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Configuration", 0, 1)
+    pdf.set_font("Arial", "", 10)
+    
+    # Tableau de configuration
     config_data = [
         ["Paramètre", "Valeur"],
         ["Nombre d'échantillons", str(config.get('sample_count', 'N/A'))],
@@ -384,28 +378,45 @@ def generate_pdf_report(data, elements, config, analysis=None, comparison=None):
     else:
         config_data.append(["QAQC", "Non"])
     
-    config_table = Table(config_data, colWidths=[2.5*inch, 3*inch])
-    config_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (1, 0), 'CENTER'),
-        ('FONTNAME', (0, 0), (1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (1, 0), 12),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-        ('BOX', (0, 0), (-1, -1), 1, colors.black),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-    ]))
-    story.append(config_table)
-    story.append(Spacer(1, 0.3*inch))
+    # Dessiner le tableau de configuration
+    column_width = 90
+    row_height = 8
+    for i, row in enumerate(config_data):
+        for j, cell in enumerate(row):
+            # Fond gris pour l'en-tête
+            if i == 0:
+                pdf.set_fill_color(200, 200, 200)
+            else:
+                pdf.set_fill_color(245, 245, 245)
+            
+            # Dessiner la cellule
+            pdf.cell(column_width, row_height, cell, 1, 0, "L", i == 0 or j == 0)
+        pdf.ln(row_height)
+    
+    pdf.ln(10)
     
     # Statistiques descriptives
-    story.append(Paragraph("Statistiques Descriptives", heading_style))
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Statistiques Descriptives", 0, 1)
+    pdf.set_font("Arial", "", 10)
     
-    # Créer une table pour les statistiques
+    # Tableau de statistiques
     stats_df = data[elements].describe().reset_index()
-    stats_data = [["Statistique"] + elements]
+    
+    # En-tête du tableau
+    stats_header = ["Statistique"] + elements
+    column_width = 180 / len(stats_header)
+    
+    # Dessiner l'en-tête
+    pdf.set_fill_color(200, 200, 200)
+    for header in stats_header:
+        pdf.cell(column_width, row_height, header, 1, 0, "C", True)
+    pdf.ln(row_height)
+    
+    # Dessiner les lignes de statistiques
     for _, row in stats_df.iterrows():
-        stat_row = [row['index']]
+        pdf.cell(column_width, row_height, row['index'], 1, 0, "L", True)
+        
         for element in elements:
             value = row[element]
             # Formater les valeurs numériques
@@ -416,38 +427,25 @@ def generate_pdf_report(data, elements, config, analysis=None, comparison=None):
                     formatted_value = f"{value:.4f}"
             else:
                 formatted_value = str(value)
-            stat_row.append(formatted_value)
-        stats_data.append(stat_row)
+            pdf.cell(column_width, row_height, formatted_value, 1, 0, "R")
+        pdf.ln(row_height)
     
-    # Calculer les largeurs de colonnes en fonction du nombre d'éléments
-    col_width = 6.5 / (len(elements) + 1)
-    col_widths = [1.5*inch] + [col_width*inch] * len(elements)
-    
-    stats_table = Table(stats_data, colWidths=col_widths)
-    stats_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        ('BACKGROUND', (0, 1), (0, -1), colors.lightgrey),
-        ('BOX', (0, 0), (-1, -1), 1, colors.black),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-        ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),
-    ]))
-    story.append(stats_table)
-    story.append(Spacer(1, 0.3*inch))
+    pdf.ln(10)
     
     # Visualisations - Histogrammes
-    story.append(Paragraph("Distributions des Éléments", heading_style))
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Distributions des Éléments", 0, 1)
     
     for i, element in enumerate(elements):
-        story.append(Paragraph(f"Distribution de {element}", subheading_style))
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, f"Distribution de {element}", 0, 1)
         
         # Créer histogramme
         fig, ax = plt.subplots(figsize=(8, 4))
-        sns.histplot(data[data['Type'] == 'Regular'][element] if 'Type' in data.columns else data[element], 
-                    kde=True, ax=ax)
+        if 'Type' in data.columns:
+            sns.histplot(data[data['Type'] == 'Regular'][element], kde=True, ax=ax)
+        else:
+            sns.histplot(data[element], kde=True, ax=ax)
         ax.set_title(f"Distribution de {element}")
         
         # Sauvegarder en fichier temporaire
@@ -460,11 +458,13 @@ def generate_pdf_report(data, elements, config, analysis=None, comparison=None):
         plt.close(fig)
         
         # Ajouter au PDF
-        story.append(Image(temp_img_name, width=6*inch, height=3*inch))
-        story.append(Spacer(1, 0.2*inch))
+        pdf.image(temp_img_name, x=10, w=180)
+        pdf.ln(5)
     
     # Matrice de corrélation
-    story.append(Paragraph("Matrice de Corrélation", heading_style))
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Matrice de Corrélation", 0, 1)
     
     # Calculer la matrice de corrélation
     if 'Type' in data.columns:
@@ -486,103 +486,106 @@ def generate_pdf_report(data, elements, config, analysis=None, comparison=None):
     plt.close(fig)
     
     # Ajouter au PDF
-    story.append(Image(temp_corr_name, width=6*inch, height=4.5*inch))
-    story.append(Spacer(1, 0.3*inch))
+    pdf.image(temp_corr_name, x=20, w=160)
+    pdf.ln(5)
     
     # Ajouter section QAQC si incluse
     if config.get('include_qaqc', False) and 'Type' in data.columns:
-        story.append(Paragraph("Analyse QAQC", heading_style))
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(0, 10, "Analyse QAQC", 0, 1)
         
         # Résumé QAQC
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, "Résumé des échantillons QAQC", 0, 1)
+        
         qaqc_summary = data['Type'].value_counts().reset_index()
         qaqc_summary.columns = ['Type', 'Count']
         
-        qaqc_data = [["Type d'échantillon", "Nombre"]]
+        # Dessiner un tableau pour le résumé QAQC
+        pdf.set_font("Arial", "", 10)
+        headers = ["Type d'échantillon", "Nombre"]
+        col_width = 90
+        
+        # En-tête
+        pdf.set_fill_color(200, 200, 200)
+        for header in headers:
+            pdf.cell(col_width, row_height, header, 1, 0, "C", True)
+        pdf.ln(row_height)
+        
+        # Données
         for _, row in qaqc_summary.iterrows():
-            qaqc_data.append([row['Type'], str(row['Count'])])
+            pdf.cell(col_width, row_height, row['Type'], 1, 0, "L")
+            pdf.cell(col_width, row_height, str(row['Count']), 1, 0, "R")
+            pdf.ln(row_height)
         
-        qaqc_table = Table(qaqc_data, colWidths=[3*inch, 2*inch])
-        qaqc_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (1, 0), 'CENTER'),
-            ('FONTNAME', (0, 0), (1, 0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0, 0), (1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('BOX', (0, 0), (-1, -1), 1, colors.black),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('ALIGN', (1, 1), (1, -1), 'CENTER'),
-        ]))
-        story.append(qaqc_table)
-        story.append(Spacer(1, 0.3*inch))
-        
-        # Si des données de comparaison sont fournies
-        if comparison and isinstance(comparison, dict):
-            story.append(Paragraph("Comparaison avec Données Réelles", heading_style))
-            
-            # Tableau de comparaison des statistiques
-            if 'basic_stats' in comparison:
-                story.append(Paragraph("Comparaison des Statistiques", subheading_style))
-                
-                comp_data = [["Statistique", "Type"] + elements]
-                stats_generated = data[elements].describe().reset_index()
-                stats_real = comparison['basic_stats'].reset_index()
-                
-                # Combiner les statistiques générées et réelles
-                for stat in stats_generated['index'].unique():
-                    gen_row = stats_generated[stats_generated['index'] == stat].iloc[0]
-                    real_row = stats_real[stats_real['index'] == stat].iloc[0]
-                    
-                    # Ligne pour données générées
-                    gen_values = [stat, "Générées"]
-                    for element in elements:
-                        value = gen_row[element]
-                        if isinstance(value, (int, float)):
-                            if value >= 1000 or value <= 0.001:
-                                formatted_value = f"{value:.2e}"
-                            else:
-                                formatted_value = f"{value:.4f}"
-                        else:
-                            formatted_value = str(value)
-                        gen_values.append(formatted_value)
-                    comp_data.append(gen_values)
-                    
-                    # Ligne pour données réelles
-                    real_values = [stat, "Réelles"]
-                    for element in elements:
-                        value = real_row[element]
-                        if isinstance(value, (int, float)):
-                            if value >= 1000 or value <= 0.001:
-                                formatted_value = f"{value:.2e}"
-                            else:
-                                formatted_value = f"{value:.4f}"
-                        else:
-                            formatted_value = str(value)
-                        real_values.append(formatted_value)
-                    comp_data.append(real_values)
-                
-                # Calculer les largeurs de colonnes
-                comp_col_width = 6.5 / (len(elements) + 2)
-                comp_col_widths = [1.2*inch, 1*inch] + [comp_col_width*inch] * len(elements)
-                
-                comp_table = Table(comp_data, colWidths=comp_col_widths)
-                comp_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                    ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                    ('BACKGROUND', (0, 1), (0, -1), colors.lightgrey),
-                    ('BACKGROUND', (1, 1), (1, -1), colors.lightblue),
-                    ('BOX', (0, 0), (-1, -1), 1, colors.black),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-                    ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
-                ]))
-                story.append(comp_table)
-                story.append(Spacer(1, 0.3*inch))
+        pdf.ln(10)
     
-    # Construire le PDF final
-    doc.build(story)
+    # Si des données de comparaison sont fournies
+    if comparison and isinstance(comparison, dict) and 'basic_stats' in comparison:
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(0, 10, "Comparaison avec Données Réelles", 0, 1)
+        
+        # Tableau de comparaison des statistiques
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, "Comparaison des Statistiques", 0, 1)
+        pdf.set_font("Arial", "", 10)
+        
+        # Statistiques générées et réelles
+        stats_generated = data[elements].describe().reset_index()
+        stats_real = comparison['basic_stats'].reset_index()
+        
+        for stat in stats_generated['index'].unique():
+            # Titre de la statistique
+            pdf.set_fill_color(220, 220, 220)
+            pdf.cell(0, row_height, stat, 1, 1, "C", True)
+            
+            # En-tête des colonnes
+            pdf.set_fill_color(200, 200, 200)
+            pdf.cell(40, row_height, "Type de données", 1, 0, "L", True)
+            
+            col_width = (180 - 40) / len(elements)
+            for element in elements:
+                pdf.cell(col_width, row_height, element, 1, 0, "C", True)
+            pdf.ln(row_height)
+            
+            # Données générées
+            gen_row = stats_generated[stats_generated['index'] == stat].iloc[0]
+            pdf.cell(40, row_height, "Générées", 1, 0, "L")
+            
+            for element in elements:
+                value = gen_row[element]
+                if isinstance(value, (int, float)):
+                    if value >= 1000 or value <= 0.001:
+                        formatted_value = f"{value:.2e}"
+                    else:
+                        formatted_value = f"{value:.4f}"
+                else:
+                    formatted_value = str(value)
+                pdf.cell(col_width, row_height, formatted_value, 1, 0, "R")
+            pdf.ln(row_height)
+            
+            # Données réelles
+            real_row = stats_real[stats_real['index'] == stat].iloc[0]
+            pdf.cell(40, row_height, "Réelles", 1, 0, "L")
+            
+            for element in elements:
+                value = real_row[element]
+                if isinstance(value, (int, float)):
+                    if value >= 1000 or value <= 0.001:
+                        formatted_value = f"{value:.2e}"
+                    else:
+                        formatted_value = f"{value:.4f}"
+                else:
+                    formatted_value = str(value)
+                pdf.cell(col_width, row_height, formatted_value, 1, 0, "R")
+            pdf.ln(row_height)
+            
+            pdf.ln(5)
+    
+    # Sauvegarder le PDF
+    pdf.output(temp_filename)
     
     return temp_filename
 
